@@ -188,14 +188,31 @@ a:hover {
   color: var(--gold);
 }
 
-/* Sticky on large screens */
-@media (min-width: 1000px) {
+/* ---- Two-column layout ------------------------------------ */
+.main-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 2rem;
+  align-items: start;
+  padding-top: 2rem;
+}
+
+.toc-wrapper {
+  position: sticky;
+  top: 1.5rem;
+  align-self: start;
+}
+
+.main-content {
+  min-width: 0; /* prevent grid blowout */
+}
+
+@media (max-width: 900px) {
+  .main-layout {
+    grid-template-columns: 1fr;
+  }
   .toc-wrapper {
-    float: left;
-    width: 230px;
-    margin: 0 2rem 2rem 0;
-    position: sticky;
-    top: 1rem;
+    position: static;
   }
 }
 

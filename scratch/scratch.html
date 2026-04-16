@@ -29,9 +29,10 @@
 
   <!-- ============ MAIN ============ -->
   <main class="page">
+    <div class="main-layout">
 
-    <!-- Table of Contents -->
-    <div class="toc-wrapper">
+    <!-- Left: sticky TOC column -->
+    <aside class="toc-wrapper">
       <nav class="toc" aria-label="Table of contents">
         <h2>On this page</h2>
         <ol>
@@ -44,7 +45,10 @@
           <li><a href="#play-the-game">Play the Game</a></li>
         </ol>
       </nav>
-    </div>
+    </aside>
+
+    <!-- Right: all content -->
+    <div class="main-content">
 
     <!-- ============ WHY I RIDE ============ -->
     <section class="content-section" id="why-i-ride">
@@ -331,9 +335,11 @@
       <!-- Required: YouTube embed via <iframe> in a responsive 16:9 container -->
       <div class="responsive-iframe">
         <iframe
-          src="https://www.youtube.com/embed/ApMz1-zr5cM"
-          title="Travis Rice — The Art of Flight (trailer)"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          src="https://www.youtube.com/embed/KeU0J2_fLlg?si=YvDTVS2eQPbX6zKn"
+          title="YouTube video player"
+          frameborder="0"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          referrerpolicy="strict-origin-when-cross-origin"
           allowfullscreen
           loading="lazy">
         </iframe>
@@ -387,6 +393,8 @@
       <a href="game.html" class="btn-powder">&#127918; Drop In &rarr; Play Now</a>
     </section>
 
+    </div> <!-- /.main-content -->
+    </div> <!-- /.main-layout -->
   </main>
 
   <!-- ============ FOOTER ============ -->

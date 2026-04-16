@@ -15,13 +15,13 @@
       min-height: 100vh;
       font-family: monospace;
       color: #fff;
-      overflow-x: hidden;
+      overflow: hidden;
     }
     #back-link {
       position: fixed;
       top: 10px;
       left: 14px;
-      color: rgba(255,255,255,0.55);
+      color: rgba(255,255,255,0.45);
       font-size: 0.78rem;
       text-decoration: none;
       z-index: 100;
@@ -31,7 +31,7 @@
     #canvas-wrap {
       position: relative;
       margin-top: 36px;
-      width: min(100vw, 177.78vh); /* maintain 16:9 */
+      width: min(100vw, 177.78vh);
       max-width: 960px;
     }
     canvas {
@@ -45,7 +45,7 @@
     #controls-help {
       margin-top: 10px;
       font-size: 0.72rem;
-      color: rgba(255,255,255,0.45);
+      color: rgba(255,255,255,0.38);
       text-align: center;
       letter-spacing: 0.05em;
       padding: 0 1rem;
@@ -56,53 +56,75 @@
 <body>
 
 <a id="back-link" href="scratch.html">&#8592; Back</a>
-
 <div id="canvas-wrap">
   <canvas id="gc" width="320" height="180"></canvas>
 </div>
-
 <div id="controls-help">
-  SPACE / TAP = Jump &nbsp;|&nbsp; &larr;&rarr; = Spin &nbsp;|&nbsp;
-  &uarr; = Grab &nbsp;|&nbsp; &darr; = Method &nbsp;|&nbsp;
-  R = Retry &nbsp;|&nbsp; M = Mute
-  <br>Mobile: swipe left/right = spin &nbsp;|&nbsp; swipe up = grab &nbsp;|&nbsp; swipe down = method
+  SPACE / TAP = Jump &nbsp;|&nbsp; &larr;&rarr; = Spin (180 / 360 / 540…) &nbsp;|&nbsp;
+  &uarr; = Grab &nbsp;|&nbsp; &darr; = Method &nbsp;|&nbsp; R = Retry &nbsp;|&nbsp; M = Mute
+  <br>Release tricks BEFORE you land or you wipe out!
 </div>
 
 <script>
 // ================================================================
-// POWDER RUN — single-file pixel-art snowboarding game
-// Zach Runyon · BYU IS Class
+// POWDER RUN — complete rewrite
+// Downhill pixel-art snowboarding · Zach Runyon · BYU IS
 // ================================================================
 
 const canvas = document.getElementById('gc');
 const ctx    = canvas.getContext('2d');
 const W = 320, H = 180;
 
+// ================================================================
 // --- CONSTANTS ---
-const GRAVITY   = 0.28;
-const GROUND_Y  = H - 28;
-const LS_KEY    = 'zkrunyon_snowboard_highscore';
-const FIXED_DT  = 1/60;
+// ================================================================
+const GRAVITY    = 0.26;
+const LS_KEY     = 'zkrunyon_snowboard_highscore';
+const FIXED_DT   = 1 / 60;
+const SPIN_SPEED = 4.8;          // degrees/frame while holding arrow
+const SPIN_WINDOW = 38;          // degrees from 180-multiple = clean landing
+const TREE_SAFE_START = 420;     // no trees until this world-X
+
+// ================================================================
+// --- STATIC BACKGROUND (pre-rendered once, blitted every frame) ---
+// ================================================================
+const staticBg = document.createElement('canvas');
+staticBg.width = W; staticBg.height = H;
+const sbg = staticBg.getContext('2d');
+
+(function buildStaticBg() {
+  // Sky gradient
+  const grad = sbg.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0,   '#060914');
+  grad.addColorStop(0.5, '#0a1628');
+  grad.addColorStop(1,   '#0f2240');
+  sbg.fillStyle = grad;
+  sbg.fillRect(0, 0, W, H);
+
+  // Stars — golden-ratio distribution, no random() so it's deterministic
+  for (let i = 0; i < 64; i++) {
+    const sx = (i * 137.508 * 1.7) % W | 0;
+    const sy = (i * 97.31  * 1.3) % (H * 0.72) | 0;
+    const bright = 0.35 + (i % 5) * 0.12;
+    sbg.fillStyle = `rgba(255,255,255,${bright})`;
+    sbg.fillRect(sx, sy, i % 7 === 0 ? 2 : 1, i % 7 === 0 ? 2 : 1);
+  }
+
+  // Moon
+  sbg.fillStyle = 'rgba(255,253,231,0.07)';
+  sbg.beginPath(); sbg.arc(W - 24, 19, 13, 0, Math.PI * 2); sbg.fill();
+  sbg.fillStyle = '#fffde7';
+  sbg.beginPath(); sbg.arc(W - 24, 19, 7, 0, Math.PI * 2);  sbg.fill();
+})();
 
 // ================================================================
 // --- AUDIO ---
 // ================================================================
-let audioCtx = null;
-let muted = false;
-let musicNodes = [];
-let musicStarted = false;
+let audioCtx = null, muted = false, musicStarted = false, musicTimer = null, musicBeat = 0;
 
 function initAudio() {
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-}
-
-function masterGain() {
-  if (!audioCtx) return null;
-  const g = audioCtx.createGain();
-  g.gain.value = muted ? 0 : 0.18;
-  g.connect(audioCtx.destination);
-  return g;
 }
 
 function playTone(freq, type, dur, vol, delay) {
@@ -112,151 +134,100 @@ function playTone(freq, type, dur, vol, delay) {
   const g = audioCtx.createGain();
   o.type = type || 'square';
   o.frequency.setValueAtTime(freq, t);
-  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.setValueAtTime(vol || 0.14, t);
   g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-  o.connect(g);
-  g.connect(audioCtx.destination);
-  o.start(t);
-  o.stop(t + dur + 0.01);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(t); o.stop(t + dur + 0.01);
 }
 
-function sfxJump() {
-  playTone(330, 'square', 0.08, 0.12);
-  playTone(440, 'square', 0.06, 0.10, 0.05);
-}
+function sfxJump()  { playTone(330,'square',0.08,0.11); playTone(440,'square',0.06,0.09,0.05); }
+function sfxTrick() { [523,659,784,1047].forEach((f,i)=>playTone(f,'square',0.07,0.12,i*0.04)); }
+function sfxLand()  { playTone(220,'triangle',0.1,0.16); }
+function sfxCrash() { playTone(180,'sawtooth',0.05,0.2); playTone(100,'sawtooth',0.2,0.18,0.05); playTone(60,'sawtooth',0.3,0.14,0.12); }
+function sfxCombo() { [784,988,1175,1568].forEach((f,i)=>playTone(f,'triangle',0.06,0.14,i*0.04)); }
 
-function sfxTrick() {
-  [523, 659, 784, 1047].forEach((f, i) => playTone(f, 'square', 0.07, 0.13, i * 0.045));
-}
-
-function sfxLand() {
-  playTone(220, 'triangle', 0.12, 0.18);
-}
-
-function sfxCrash() {
-  playTone(180, 'sawtooth', 0.05, 0.2);
-  playTone(120, 'sawtooth', 0.15, 0.18, 0.04);
-  playTone(80,  'sawtooth', 0.25, 0.15, 0.1);
-}
-
-function sfxCombo() {
-  [784, 988, 1175, 1568].forEach((f, i) => playTone(f, 'triangle', 0.06, 0.15, i * 0.04));
-}
-
-// 4-bar chiptune loop
-const NOTES = [
-  196, 220, 196, 165,
-  175, 196, 175, 147,
-  165, 196, 220, 196,
-  175, 165, 147, 131
-];
-let musicBeat = 0;
-let musicTimer = null;
-
+const NOTES = [196,220,196,165, 175,196,175,147, 165,196,220,196, 175,165,147,131];
 function startMusic() {
   if (!audioCtx || musicStarted) return;
   musicStarted = true;
   scheduleBeat();
 }
-
 function scheduleBeat() {
   if (!audioCtx) return;
-  const bpm = 160;
-  const beatLen = 60 / bpm;
+  const bpm = 160, bl = 60 / bpm;
   const note = NOTES[musicBeat % NOTES.length];
   if (!muted) {
-    playTone(note,       'square',   beatLen * 0.5, 0.07);
-    playTone(note * 2,   'triangle', beatLen * 0.25, 0.04);
-    if (musicBeat % 4 === 0) playTone(55, 'square', beatLen * 0.4, 0.06);
-    if (musicBeat % 4 === 2) playTone(73, 'square', beatLen * 0.3, 0.05);
+    playTone(note,     'square',   bl * 0.5,  0.07);
+    playTone(note * 2, 'triangle', bl * 0.25, 0.04);
+    if (musicBeat % 4 === 0) playTone(55, 'square', bl * 0.4, 0.06);
+    if (musicBeat % 4 === 2) playTone(73, 'square', bl * 0.3, 0.05);
   }
   musicBeat++;
-  musicTimer = setTimeout(scheduleBeat, beatLen * 1000);
+  musicTimer = setTimeout(scheduleBeat, bl * 1000);
 }
-
 function stopMusic() {
   if (musicTimer) clearTimeout(musicTimer);
-  musicStarted = false;
-  musicBeat = 0;
+  musicStarted = false; musicBeat = 0;
+}
+function toggleMute() {
+  muted = !muted;
+  if (muted) stopMusic();
+  else if (gameState === 'playing') { musicStarted = false; startMusic(); }
 }
 
 // ================================================================
 // --- TERRAIN ---
 // ================================================================
-let segments = [];  // {x1,y1,x2,y2, isRamp}
-let camX = 0;
-const SEG_LEN = 48;
+let segments = []; // {x1,y1,x2,y2,isRamp}
+let camX = 0, camY = 0;
 
-function mkSeg(x1, y1, angle, isRamp) {
-  const len = SEG_LEN + (Math.random() * 24 | 0);
-  const x2 = x1 + Math.cos(angle) * len;
-  const y2 = y1 + Math.sin(angle) * len;
-  return { x1, y1, x2, y2, isRamp: !!isRamp };
+function genSeg(x1, y1) {
+  const r = Math.random();
+  let dy, isRamp = false, w = 44 + (Math.random() * 22 | 0);
+  if      (r < 0.08)  { dy = -(12 + Math.random() * 10); isRamp = true; w = 30 + (Math.random()*14|0); }
+  else if (r < 0.18)  { dy =  2 + Math.random() * 5;  } // gentle
+  else if (r < 0.42)  { dy =  7 + Math.random() * 9;  } // moderate
+  else if (r < 0.62)  { dy = 12 + Math.random() * 12; } // steep
+  else                { dy =  5 + Math.random() * 7;  } // default
+  const y2 = y1 + dy;
+  return { x1, y1, x2: x1 + w, y2, isRamp };
 }
 
 function initTerrain() {
   segments = [];
-  let x = -60, y = GROUND_Y;
-  // flat start
+  let x = -80, y = 44;
+  // flat start platform
   for (let i = 0; i < 6; i++) {
-    segments.push({ x1: x, y1: y, x2: x + SEG_LEN, y2: y, isRamp: false });
-    x += SEG_LEN;
+    segments.push({ x1: x, y1: y, x2: x + 52, y2: y, isRamp: false });
+    x += 52;
   }
-  // fill ahead
-  while (x < W * 4) x = extendTerrain(x, y).x2, y = segments[segments.length-1].y2;
-}
-
-function extendTerrain(startX, startY) {
-  const r = Math.random();
-  let angle, isRamp = false;
-  if (r < 0.12) {
-    // uphill ramp
-    angle = -0.28 - Math.random() * 0.18;
-    isRamp = true;
-  } else if (r < 0.22) {
-    angle = 0.18 + Math.random() * 0.14; // steeper downhill
-  } else if (r < 0.40) {
-    angle = 0.06 + Math.random() * 0.10;
-  } else {
-    angle = -0.02 + Math.random() * 0.04; // near flat
+  // generate ahead
+  while (x < W * 6) {
+    const s = genSeg(x, y);
+    segments.push(s);
+    x = s.x2; y = s.y2;
   }
-  // clamp y
-  const seg = mkSeg(startX, Math.max(40, Math.min(GROUND_Y + 10, startY)), angle, isRamp);
-  // hard clamp end y
-  seg.y2 = Math.max(40, Math.min(GROUND_Y + 10, seg.y2));
-  segments.push(seg);
-  return seg;
 }
 
 function maintainTerrain() {
-  // despawn off-screen left
-  while (segments.length > 2 && segments[0].x2 < camX - 80) {
-    segments.shift();
-  }
-  // extend right
+  while (segments.length > 2 && segments[0].x2 < camX - 120) segments.shift();
   const last = segments[segments.length - 1];
-  while (last && last.x2 < camX + W + 200) {
-    const newSeg = extendTerrain(last.x2, last.y2);
-    // update last reference
-    const l2 = segments[segments.length - 1];
-    while (l2 && l2.x2 < camX + W + 200) {
-      const ns = extendTerrain(segments[segments.length-1].x2, segments[segments.length-1].y2);
-      if (ns.x2 >= camX + W + 200) break;
-    }
-    break;
+  if (last && last.x2 < camX + W + 350) {
+    const s = genSeg(last.x2, last.y2);
+    segments.push(s);
   }
 }
 
-// Get ground Y at world X by linearly interpolating across segments
 function groundAt(wx) {
   for (let i = 0; i < segments.length; i++) {
     const s = segments[i];
     if (wx >= s.x1 && wx <= s.x2) {
-      const t = (wx - s.x1) / (s.x2 - s.x1 || 1);
+      const t = (wx - s.x1) / ((s.x2 - s.x1) || 1);
       return s.y1 + (s.y2 - s.y1) * t;
     }
   }
-  return GROUND_Y;
+  const last = segments[segments.length - 1];
+  return last ? last.y2 : H * 0.5;
 }
 
 function segmentAt(wx) {
@@ -267,247 +238,118 @@ function segmentAt(wx) {
 }
 
 // ================================================================
-// --- PARALLAX BACKGROUND LAYERS ---
+// --- TREES ---
 // ================================================================
-// Pre-compute pine tree positions
-const pines = [];
-for (let i = 0; i < 80; i++) {
-  pines.push({ x: i * 120 + Math.random() * 80, h: 18 + Math.random() * 22 | 0, layer: Math.random() < 0.5 ? 0 : 1 });
-}
+let trees = []; // {wx, baseY, height, type}
 
-function drawBackground() {
-  // Sky gradient
-  const grad = ctx.createLinearGradient(0, 0, 0, H * 0.65);
-  grad.addColorStop(0,   '#0a0e27');
-  grad.addColorStop(0.5, '#112244');
-  grad.addColorStop(1,   '#1a3a6b');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, H * 0.65);
-
-  // Stars (static layer)
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  const starSeed = [13,37,71,101,151,211,257,293,311,337,353,379,401,421,443];
-  starSeed.forEach((s, i) => {
-    const sx = (s * 19 + i * 37) % W;
-    const sy = (s * 7  + i * 13) % (H * 0.45);
-    ctx.fillRect(sx, sy, 1, 1);
-  });
-
-  // Moon
-  ctx.fillStyle = '#fffde7';
-  ctx.beginPath();
-  ctx.arc(W - 30, 22, 8, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Mountain silhouette (far, slow parallax)
-  const mx = -(camX * 0.05) % W;
-  ctx.fillStyle = '#0e1f3d';
-  for (let p = -1; p <= 1; p++) {
-    const ox = mx + p * W;
-    ctx.beginPath();
-    ctx.moveTo(ox, H * 0.65);
-    ctx.lineTo(ox + 60,  H * 0.28);
-    ctx.lineTo(ox + 120, H * 0.40);
-    ctx.lineTo(ox + 180, H * 0.18);
-    ctx.lineTo(ox + 240, H * 0.34);
-    ctx.lineTo(ox + 300, H * 0.20);
-    ctx.lineTo(ox + W,   H * 0.65);
-    ctx.closePath();
-    ctx.fill();
-    // snow caps
-    ctx.fillStyle = 'rgba(255,255,255,0.25)';
-    ctx.beginPath();
-    ctx.moveTo(ox + 175, H * 0.18);
-    ctx.lineTo(ox + 160, H * 0.26);
-    ctx.lineTo(ox + 190, H * 0.26);
-    ctx.closePath();
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(ox + 295, H * 0.20);
-    ctx.lineTo(ox + 280, H * 0.28);
-    ctx.lineTo(ox + 310, H * 0.28);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = '#0e1f3d';
-  }
-
-  // Pine trees (mid parallax)
-  pines.forEach(pine => {
-    const px = ((pine.x - camX * (pine.layer ? 0.35 : 0.55)) % (W + 200) + W + 200) % (W + 200) - 100;
-    const py = H * 0.62 - pine.h * 0.3;
-    const col = pine.layer ? '#0d2e17' : '#1e4d2b';
-    ctx.fillStyle = col;
-    // trunk
-    ctx.fillRect(px - 1, py + pine.h, 2, 6);
-    // three triangle tiers
-    const tiers = 3;
-    for (let t = 0; t < tiers; t++) {
-      const tw = (pine.h * 0.5 * (tiers - t)) / tiers;
-      const ty = py + (pine.h * t / tiers);
-      ctx.beginPath();
-      ctx.moveTo(px, ty);
-      ctx.lineTo(px - tw, ty + pine.h / tiers + 2);
-      ctx.lineTo(px + tw, ty + pine.h / tiers + 2);
-      ctx.closePath();
-      ctx.fill();
+function spawnTrees(fromX, toX) {
+  let x = fromX + 60 + Math.random() * 60;
+  while (x < toX) {
+    const seg = segmentAt(x);
+    if (seg && !seg.isRamp) {
+      trees.push({
+        wx:     x,
+        baseY:  groundAt(x),
+        height: 13 + (Math.random() * 16 | 0),
+        tall:   Math.random() > 0.4
+      });
     }
-    // snow on top
-    ctx.fillStyle = 'rgba(220,235,255,0.55)';
-    ctx.beginPath();
-    ctx.moveTo(px, py - 1);
-    ctx.lineTo(px - pine.h * 0.15, py + pine.h * 0.2);
-    ctx.lineTo(px + pine.h * 0.15, py + pine.h * 0.2);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = col;
-  });
+    x += 100 + Math.random() * 80;
+  }
 }
+
+function initTrees() {
+  trees = [];
+  spawnTrees(TREE_SAFE_START, W * 6);
+}
+
+function maintainTrees() {
+  while (trees.length && trees[0].wx < camX - 80) trees.shift();
+  const lastX = trees.length ? trees[trees.length - 1].wx : camX + W;
+  if (lastX < camX + W + 450) spawnTrees(lastX + 80, lastX + 550);
+}
+
+// ================================================================
+// --- PARALLAX MIDGROUND (pines, generated once) ---
+// ================================================================
+const PINES = Array.from({length: 38}, (_, i) => ({
+  rx:    i * 190 + (i * 37) % 85,
+  h:     15 + (i * 13) % 17,
+  layer: i % 3   // 0=far 1=mid 2=near
+}));
+const PINE_PX   = [0.22, 0.42, 0.62];
+const PINE_COL  = ['#09200f', '#0e2e15', '#1a4828'];
+const PINE_WRAP = W + 240;
 
 // ================================================================
 // --- PLAYER ---
 // ================================================================
 const player = {
-  wx: 80, wy: GROUND_Y - 8,
-  vx: 2.2, vy: 0,
-  onGround: true,
-  angle: 0,          // board tilt
-  spinAngle: 0,      // accumulated spin during air
+  wx: 100, wy: 44,
+  vx: 1.6, vy: 0,
+  onGround: false,
+  angle: 0,
+  spinAngle: 0,
   grabbing: false,
   method: false,
   airTime: 0,
   crashed: false,
-  landSketch: 0,     // frames of sketchy landing
 };
 
 function resetPlayer() {
-  player.wx = 80;
-  player.wy = GROUND_Y - 8;
-  player.vx = 2.2;
-  player.vy = 0;
-  player.onGround = true;
-  player.angle = 0;
-  player.spinAngle = 0;
-  player.grabbing = false;
-  player.method = false;
-  player.airTime = 0;
-  player.crashed = false;
-  player.landSketch = 0;
+  Object.assign(player, {
+    wx:44+52*3, wy:44, vx:1.8, vy:0,
+    onGround:false, angle:0, spinAngle:0,
+    grabbing:false, method:false, airTime:0, crashed:false
+  });
 }
 
-// Draw the rider as chunky pixel blocks (no sprite sheet)
-function drawRider(sx, sy, boardAngle, spinning, grabbed, methoded, crashed) {
+// Draw pixel-art rider
+function drawRider(sx, sy, ang, grabbed, methoded, crashed) {
   ctx.save();
-  ctx.translate(sx, sy);
-  ctx.rotate(boardAngle);
+  ctx.translate(sx | 0, sy | 0);
+  ctx.rotate(ang);
 
-  const C = {
-    jacket: '#1a6bbf',
-    pants:  '#0b2545',
-    boot:   '#2c1810',
-    skin:   '#f5c6a0',
-    helmet: '#c8a951',
-    goggle: '#1a1a2e',
-    board:  '#e74c3c',
-    boardEdge: '#c0392b',
-    goggleLens: '#7ec8e3',
-  };
+  const J='#1a6bbf', P='#0b2545', B='#2c1810', SK='#f5c6a0',
+        H='#c8a951', G='#1a1a2e', GL='#7ec8e3', RD='#e74c3c', RE='#c0392b';
 
   if (crashed) {
-    // splayed crash pose
-    ctx.fillStyle = C.jacket;
-    ctx.fillRect(-8, -6, 6, 6);   // torso
-    ctx.fillRect(-12, -2, 5, 4);  // arm out
-    ctx.fillRect(2,  -2,  5, 4);  // arm out
-    ctx.fillStyle = C.skin;
-    ctx.fillRect(-4, -12, 6, 6);  // head
-    ctx.fillStyle = C.pants;
-    ctx.fillRect(-7, 0, 5, 5);    // leg
-    ctx.fillRect(-1, 0, 5, 5);
-    ctx.fillStyle = C.board;
-    ctx.fillRect(-14, 3, 20, 3);  // board flat
-    ctx.fillStyle = C.boardEdge;
-    ctx.fillRect(-14, 3, 1, 3);
-    ctx.fillRect(5,   3, 1, 3);
+    ctx.fillStyle=J; ctx.fillRect(-10,-3,20,5);
+    ctx.fillStyle=SK;ctx.fillRect(-4,-12,6,6);
+    ctx.fillStyle=H; ctx.fillRect(-5,-13,7,4);
+    ctx.fillStyle=P; ctx.fillRect(-11,2,7,5); ctx.fillRect(3,2,7,5);
+    ctx.fillStyle=RD;ctx.save();ctx.rotate(0.35);ctx.fillRect(-13,6,24,3);ctx.restore();
   } else if (grabbed) {
-    // grab — knees tucked, hand on board
-    ctx.fillStyle = C.board;
-    ctx.fillRect(-10, 4, 20, 3);
-    ctx.fillStyle = C.boardEdge;
-    ctx.fillRect(-10, 4, 1, 3);
-    ctx.fillRect(9,   4, 1, 3);
-    ctx.fillStyle = C.boot;
-    ctx.fillRect(-7, 0, 4, 5);
-    ctx.fillRect(3,  0, 4, 5);
-    ctx.fillStyle = C.pants;
-    ctx.fillRect(-6, -4, 12, 5);  // tucked body
-    ctx.fillStyle = C.jacket;
-    ctx.fillRect(-5, -9, 9, 6);
-    ctx.fillStyle = C.skin;
-    ctx.fillRect(-4, -14, 7, 6);  // head
-    // hand touching board
-    ctx.fillStyle = C.skin;
-    ctx.fillRect(-2, 2, 4, 3);
-    ctx.fillStyle = C.helmet;
-    ctx.fillRect(-4, -15, 7, 4);
-    ctx.fillStyle = C.goggle;
-    ctx.fillRect(-3, -13, 6, 3);
-    ctx.fillStyle = C.goggleLens;
-    ctx.fillRect(-3, -13, 3, 2);
-    ctx.fillRect(1,  -13, 2, 2);
+    ctx.fillStyle=RD;ctx.fillRect(-10,4,20,3);
+    ctx.fillStyle=RE;ctx.fillRect(-10,4,1,3);ctx.fillRect(9,4,1,3);
+    ctx.fillStyle=B; ctx.fillRect(-7,-1,4,6); ctx.fillRect(3,-1,4,6);
+    ctx.fillStyle=P; ctx.fillRect(-6,-5,12,5);
+    ctx.fillStyle=J; ctx.fillRect(-5,-10,9,6);
+    ctx.fillStyle=SK;ctx.fillRect(-3,-15,6,6); ctx.fillRect(-1,1,3,4);
+    ctx.fillStyle=H; ctx.fillRect(-3,-16,6,4);
+    ctx.fillStyle=G; ctx.fillRect(-3,-14,6,3);
+    ctx.fillStyle=GL;ctx.fillRect(-3,-14,3,2);ctx.fillRect(0,-14,3,2);
   } else if (methoded) {
-    // method grab — board tweaked back
-    ctx.fillStyle = C.board;
-    ctx.save();
-    ctx.rotate(-0.5);
-    ctx.fillRect(-10, 6, 20, 3);
-    ctx.fillStyle = C.boardEdge;
-    ctx.fillRect(-10, 6, 1, 3);
-    ctx.fillRect(9,   6, 1, 3);
-    ctx.restore();
-    ctx.fillStyle = C.boot;
-    ctx.fillRect(-8, 2, 4, 5);
-    ctx.fillRect(2,  0, 4, 5);
-    ctx.fillStyle = C.pants;
-    ctx.fillRect(-6, -4, 12, 5);
-    ctx.fillStyle = C.jacket;
-    ctx.fillRect(-5, -9, 9, 6);
-    ctx.fillStyle = C.skin;
-    ctx.fillRect(-4, -14, 7, 6);
-    ctx.fillStyle = C.helmet;
-    ctx.fillRect(-4, -15, 7, 4);
-    ctx.fillStyle = C.goggle;
-    ctx.fillRect(-3, -13, 6, 3);
-    ctx.fillStyle = C.goggleLens;
-    ctx.fillRect(-3, -13, 3, 2);
-    ctx.fillRect(1,  -13, 2, 2);
+    ctx.fillStyle=RD;ctx.save();ctx.rotate(-0.42);ctx.fillRect(-10,6,20,3);
+    ctx.fillStyle=RE;ctx.fillRect(-10,6,1,3);ctx.fillRect(9,6,1,3);ctx.restore();
+    ctx.fillStyle=B; ctx.fillRect(-8,0,4,6);  ctx.fillRect(3,-1,4,6);
+    ctx.fillStyle=P; ctx.fillRect(-6,-5,12,5);
+    ctx.fillStyle=J; ctx.fillRect(-5,-10,9,6);
+    ctx.fillStyle=SK;ctx.fillRect(-3,-15,6,6);
+    ctx.fillStyle=H; ctx.fillRect(-3,-16,6,4);
+    ctx.fillStyle=G; ctx.fillRect(-3,-14,6,3);
+    ctx.fillStyle=GL;ctx.fillRect(-3,-14,3,2);ctx.fillRect(0,-14,3,2);
   } else {
-    // normal riding / air pose
-    ctx.fillStyle = C.board;
-    ctx.fillRect(-10, 5, 20, 3);
-    ctx.fillStyle = C.boardEdge;
-    ctx.fillRect(-10, 5, 1, 3);
-    ctx.fillRect(9,   5, 1, 3);
-    ctx.fillStyle = C.boot;
-    ctx.fillRect(-7, 1, 4, 5);
-    ctx.fillRect(3,  1, 4, 5);
-    ctx.fillStyle = C.pants;
-    ctx.fillRect(-5, -4, 10, 6);
-    ctx.fillStyle = C.jacket;
-    ctx.fillRect(-4, -10, 8, 7);
-    // arms
-    ctx.fillRect(-10, -8, 6, 3);
-    ctx.fillRect(4,   -8, 6, 3);
-    ctx.fillStyle = C.skin;
-    ctx.fillRect(-3, -15, 6, 6);  // head
-    ctx.fillStyle = C.helmet;
-    ctx.fillRect(-3, -16, 6, 4);
-    ctx.fillStyle = C.goggle;
-    ctx.fillRect(-3, -14, 6, 3);
-    ctx.fillStyle = C.goggleLens;
-    ctx.fillRect(-3, -14, 3, 2);
-    ctx.fillRect(0,  -14, 3, 2);
+    ctx.fillStyle=RD;ctx.fillRect(-10,5,20,3);
+    ctx.fillStyle=RE;ctx.fillRect(-10,5,1,3);ctx.fillRect(9,5,1,3);
+    ctx.fillStyle=B; ctx.fillRect(-7,1,4,5);  ctx.fillRect(3,1,4,5);
+    ctx.fillStyle=P; ctx.fillRect(-5,-4,10,6);
+    ctx.fillStyle=J; ctx.fillRect(-4,-10,8,7);ctx.fillRect(-10,-8,5,3);ctx.fillRect(5,-8,5,3);
+    ctx.fillStyle=SK;ctx.fillRect(-3,-15,6,6);
+    ctx.fillStyle=H; ctx.fillRect(-3,-16,6,4);
+    ctx.fillStyle=G; ctx.fillRect(-3,-14,6,3);
+    ctx.fillStyle=GL;ctx.fillRect(-3,-14,3,2);ctx.fillRect(0,-14,3,2);
   }
-
   ctx.restore();
 }
 
@@ -515,175 +357,190 @@ function drawRider(sx, sy, boardAngle, spinning, grabbed, methoded, crashed) {
 // --- INPUT ---
 // ================================================================
 const keys = {};
-let jumpPressed   = false;
-let spinLeft      = false;
-let spinRight     = false;
-let grabPressed   = false;
-let methodPressed = false;
+let jumpPressed = false, spinLeft = false, spinRight = false,
+    grabPressed = false, methodPressed = false;
 
 document.addEventListener('keydown', e => {
   if (keys[e.code]) return;
   keys[e.code] = true;
-  if (e.code === 'Space' || e.code === 'ArrowUp' && gameState === 'playing' && player.onGround) {
-    jumpPressed = true;
-    e.preventDefault();
+  switch (e.code) {
+    case 'Space':
+      initAudio();
+      if (audioCtx?.state === 'suspended') audioCtx.resume();
+      if (gameState !== 'playing') { startGame(); return; }
+      if (player.onGround) jumpPressed = true;
+      e.preventDefault(); break;
+    case 'ArrowLeft':  spinLeft      = true; e.preventDefault(); break;
+    case 'ArrowRight': spinRight     = true; e.preventDefault(); break;
+    case 'ArrowUp':    grabPressed   = true; e.preventDefault(); break;
+    case 'ArrowDown':  methodPressed = true; e.preventDefault(); break;
+    case 'KeyR': if (gameState === 'gameover') startGame(); break;
+    case 'KeyM': toggleMute(); break;
   }
-  if (e.code === 'ArrowLeft')  { spinLeft  = true; e.preventDefault(); }
-  if (e.code === 'ArrowRight') { spinRight = true; e.preventDefault(); }
-  if (e.code === 'ArrowUp')    { grabPressed   = true; e.preventDefault(); }
-  if (e.code === 'ArrowDown')  { methodPressed = true; e.preventDefault(); }
-  if (e.code === 'KeyR' && gameState === 'gameover') startGame();
-  if (e.code === 'Space' && (gameState === 'title' || gameState === 'gameover')) {
-    initAudio();
-    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    startGame();
-    e.preventDefault();
-  }
-  if (e.code === 'KeyM') toggleMute();
 });
 
 document.addEventListener('keyup', e => {
   keys[e.code] = false;
-  if (e.code === 'ArrowLeft')  spinLeft  = false;
-  if (e.code === 'ArrowRight') spinRight = false;
+  if (e.code === 'ArrowLeft')  spinLeft      = false;
+  if (e.code === 'ArrowRight') spinRight     = false;
   if (e.code === 'ArrowUp')    grabPressed   = false;
   if (e.code === 'ArrowDown')  methodPressed = false;
 });
 
-// Touch / click
-let touchStartX = 0, touchStartY = 0;
-
+// Touch
+let tx0 = 0, ty0 = 0;
 canvas.addEventListener('pointerdown', e => {
   initAudio();
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-  touchStartX = e.clientX;
-  touchStartY = e.clientY;
-  if (gameState === 'title' || gameState === 'gameover') { startGame(); return; }
-  if (gameState === 'playing' && player.onGround) jumpPressed = true;
+  if (audioCtx?.state === 'suspended') audioCtx.resume();
+  tx0 = e.clientX; ty0 = e.clientY;
+  if (gameState !== 'playing') { startGame(); return; }
+  if (player.onGround) jumpPressed = true;
 });
-
 canvas.addEventListener('pointermove', e => {
   if (gameState !== 'playing' || player.onGround) return;
-  const dx = e.clientX - touchStartX;
-  const dy = e.clientY - touchStartY;
-  if (Math.abs(dx) > 10) { spinLeft = dx < 0; spinRight = dx > 0; }
-  if (Math.abs(dy) > 10) { grabPressed = dy < 0; methodPressed = dy > 0; }
+  const dx = e.clientX - tx0, dy = e.clientY - ty0;
+  if (Math.abs(dx) > 8) { spinLeft = dx < 0; spinRight = dx > 0; }
+  if (Math.abs(dy) > 8) { grabPressed = dy < 0; methodPressed = dy > 0; }
 });
-
 canvas.addEventListener('pointerup', () => {
   spinLeft = spinRight = grabPressed = methodPressed = false;
 });
-
-function toggleMute() {
-  muted = !muted;
-  if (muted) stopMusic();
-  else if (gameState === 'playing') { musicStarted = false; startMusic(); }
-}
 
 // ================================================================
 // --- SCORING ---
 // ================================================================
 let score      = 0;
 let bestScore  = parseInt(localStorage.getItem(LS_KEY) || '0');
-let combo      = 0;
-let comboMult  = 1;
-let trickName  = '';
-let trickFlash = 0;
-let spins360   = 0;     // completed 360s in current air
+let comboCount = 0;     // consecutive clean landings
+let airMult    = 1.0;   // multiplier built during this air
+let spinScored = 0;     // # of 180° increments scored this air
 let grabDone   = false;
 let methodDone = false;
+let pendingPts = 0;     // trick points to award on clean landing
+let trickName  = '';
+let trickFlash = 0;
 
-function resetCombo() { combo = 0; comboMult = 1; spins360 = 0; grabDone = false; methodDone = false; }
+const SPIN_PTS = [300, 800, 1500, 2500, 3800]; // per 180° increment
 
-function addPoints(pts, name) {
-  const earned = pts * comboMult;
-  score += earned;
-  combo++;
-  comboMult = Math.min(8, 1 + Math.floor(combo / 2));
-  trickName  = name + (comboMult > 1 ? ' x' + comboMult : '') + '  +' + earned;
-  trickFlash = 90;
+function resetAirState() {
+  airMult = 1.0; spinScored = 0;
+  grabDone = false; methodDone = false;
+  pendingPts = 0; player.spinAngle = 0;
+}
+
+function doTrickScore(pts, name, newMult) {
+  pendingPts += pts;
+  if (newMult) airMult = Math.min(airMult + newMult, 5.0);
+  trickName = name;
+  trickFlash = 65;
   sfxTrick();
-  if (combo > 1) sfxCombo();
+}
+
+// Returns 'crash' or 'clean'
+function checkLanding() {
+  // Holding grab or method at touchdown = crash
+  if (grabPressed || methodPressed) return 'crash';
+  // Mid-spin check (only if they actually spun)
+  if (Math.abs(player.spinAngle) > 70) {
+    const nearest = Math.round(player.spinAngle / 180) * 180;
+    if (Math.abs(player.spinAngle - nearest) > SPIN_WINDOW) return 'crash';
+  }
+  return 'clean';
+}
+
+function awardLanding() {
+  if (pendingPts === 0 && spinScored === 0) return;
+  const comboMult = 1 + comboCount * 0.3;
+  const earned = Math.round(pendingPts * airMult * comboMult);
+  score += earned;
+  comboCount++;
+  trickName = '+' + earned + (comboCount > 1 ? '  COMBO x' + comboCount : '');
+  trickFlash = 100;
+  sfxCombo();
 }
 
 // ================================================================
 // --- GAME STATE ---
 // ================================================================
-let gameState = 'title'; // 'title' | 'playing' | 'gameover'
+let gameState  = 'title';
 let frameCount = 0;
-let deathTimer = 0;
 
 function startGame() {
-  score = 0;
-  combo = 0;
-  comboMult = 1;
-  trickName = '';
-  trickFlash = 0;
-  frameCount = 0;
-  deathTimer = 0;
-  camX = 0;
-  resetPlayer();
-  initTerrain();
-  stopMusic();
-  gameState = 'playing';
-  startMusic();
+  score = 0; comboCount = 0;
+  trickName = ''; trickFlash = 0; frameCount = 0;
+  camX = 0; camY = 0;
+  resetPlayer(); resetAirState();
+  initTerrain(); initTrees();
+  stopMusic(); gameState = 'playing'; startMusic();
+}
+
+function doCrash() {
+  player.crashed = true;
+  gameState = 'gameover';
+  sfxCrash();
+  comboCount = 0;
+  if (score > bestScore) { bestScore = score; localStorage.setItem(LS_KEY, bestScore); }
 }
 
 // ================================================================
 // --- UPDATE ---
 // ================================================================
-let lastTime = null;
-let accumulator = 0;
+let lastTime = null, accumulator = 0;
 
 function update() {
   if (gameState !== 'playing') return;
-
   frameCount++;
 
   const seg = segmentAt(player.wx);
 
   // --- Jump ---
   if (jumpPressed && player.onGround) {
-    player.vy   = -5.2;
+    player.vy = -5.8;
     player.onGround = false;
-    player.airTime  = 0;
-    player.spinAngle = 0;
-    grabDone  = false;
-    methodDone = false;
-    spins360  = 0;
+    player.airTime = 0;
+    resetAirState();
     sfxJump();
   }
   jumpPressed = false;
 
-  // --- Physics ---
+  // --- Physics + tricks in air ---
   if (!player.onGround) {
     player.airTime++;
     player.vy += GRAVITY;
-    player.vx  = Math.min(player.vx + 0.012, 5.5); // accelerate slightly downhill
 
     // Spin
-    const spinSpeed = 3.6;
-    if (spinLeft)  player.spinAngle -= spinSpeed;
-    if (spinRight) player.spinAngle += spinSpeed;
+    if (spinLeft)  player.spinAngle -= SPIN_SPEED;
+    if (spinRight) player.spinAngle += SPIN_SPEED;
 
-    // Count completed 360s
-    const prevFull = spins360;
-    spins360 = Math.floor(Math.abs(player.spinAngle) / 360);
-    if (spins360 > prevFull) addPoints(500, '360°');
+    // Score 180° increments as they complete
+    const newCount = Math.floor(Math.abs(player.spinAngle) / 180);
+    if (newCount > spinScored) {
+      const idx = Math.min(spinScored, SPIN_PTS.length - 1);
+      doTrickScore(SPIN_PTS[idx], (newCount * 180) + '!', 0);
+      spinScored = newCount;
+    }
 
-    // Grab
-    if (grabPressed && !grabDone) { grabDone = true; addPoints(250, 'Grab'); }
-    // Method
-    if (methodPressed && !methodDone) { methodDone = true; addPoints(750, 'Method'); }
-
+    // Grab (one-shot per air)
     player.grabbing = grabPressed;
-    player.method   = methodPressed;
+    if (grabPressed && !grabDone) {
+      grabDone = true;
+      doTrickScore(400, 'GRAB  +0.5x', 0.5);
+    }
+
+    // Method (one-shot per air)
+    player.method = methodPressed;
+    if (methodPressed && !methodDone) {
+      methodDone = true;
+      doTrickScore(600, 'METHOD  +1x', 1.0);
+    }
 
   } else {
-    player.vy = 0;
-    player.spinAngle = 0;
-    player.grabbing  = false;
-    player.method    = false;
+    // Ground: slope follow & accelerate downhill
+    if (seg) {
+      const slope = (seg.y2 - seg.y1) / ((seg.x2 - seg.x1) || 1);
+      player.vx  = Math.max(1.6, Math.min(7.5, player.vx + slope * 0.85));
+      player.angle = Math.atan2(seg.y2 - seg.y1, seg.x2 - seg.x1);
+    }
     if (trickFlash > 0) trickFlash--;
   }
 
@@ -694,250 +551,307 @@ function update() {
   const gy = groundAt(player.wx);
   if (player.wy >= gy - 8) {
     if (!player.onGround) {
-      // Landing check
-      const normalAngle = seg ? Math.atan2(seg.y2 - seg.y1, seg.x2 - seg.x1) : 0;
-      const boardAngle  = (player.spinAngle % 360 + 360) % 360;
-      const offAngle    = Math.min(boardAngle, 360 - boardAngle); // 0=perfect, 180=upside-down
-
-      if (offAngle > 100 || (player.method && offAngle > 80)) {
-        // Crash
-        player.crashed = true;
-        gameState = 'gameover';
-        deathTimer = 180;
-        sfxCrash();
-        resetCombo();
-        if (score > bestScore) {
-          bestScore = score;
-          localStorage.setItem(LS_KEY, bestScore);
-        }
-      } else {
-        sfxLand();
-        if (offAngle > 45) {
-          // Sketchy — half points, reset combo
-          score += Math.floor(score * 0.0);
-          player.landSketch = 30;
-          resetCombo();
-        }
-        player.onGround = true;
+      // Landing
+      const result = checkLanding();
+      if (result === 'crash') {
         player.wy = gy - 8;
-        player.vy = 0;
-        // carry a little downhill momentum
-        if (seg) {
-          const slope = (seg.y2 - seg.y1) / (seg.x2 - seg.x1 || 1);
-          player.vx = Math.max(1.8, player.vx + slope * 2);
-        }
+        doCrash(); return;
+      }
+      awardLanding();
+      sfxLand();
+      player.onGround = true;
+      player.wy = gy - 8;
+      player.vy = 0;
+      player.spinAngle = 0;
+      player.grabbing = false;
+      player.method   = false;
+      if (seg) {
+        const slope = (seg.y2 - seg.y1) / ((seg.x2 - seg.x1) || 1);
+        player.vx = Math.max(2.2, player.vx + slope * 1.8);
       }
     } else {
       player.onGround = true;
       player.wy = gy - 8;
-      // slope-following
-      if (seg) {
-        const slope = (seg.y2 - seg.y1) / (seg.x2 - seg.x1 || 1);
-        player.vx = Math.max(1.6, Math.min(6.0, player.vx + slope * 1.5));
-        player.angle = Math.atan2(seg.y2 - seg.y1, seg.x2 - seg.x1);
-      }
     }
-    if (player.landSketch > 0) player.landSketch--;
   } else {
-    if (player.onGround) player.onGround = false;
+    if (player.onGround) {
+      player.onGround = false;
+      player.airTime = 0;
+      resetAirState();
+    }
   }
 
-  // Camera follow
-  const targetCamX = player.wx - W * 0.28;
-  camX += (targetCamX - camX) * 0.12;
+  // --- Tree collision ---
+  for (let i = 0; i < trees.length; i++) {
+    const t = trees[i];
+    if (t.wx < player.wx - 24) continue;
+    if (t.wx > player.wx + 24) break;
+    const dx = Math.abs(player.wx - t.wx);
+    if (dx < 7 && (player.wy - 10) > (t.baseY - t.height)) {
+      doCrash(); return;
+    }
+  }
 
-  // Maintain terrain buffer
+  // --- Distance score ---
+  if (frameCount % 9 === 0) score += Math.ceil(player.vx * 0.6) | 0;
+
+  // --- Camera: lerp toward player (both X and Y) ---
+  camX += ((player.wx - W * 0.30) - camX) * 0.10;
+  camY += ((player.wy - H * 0.52) - camY) * 0.07;
+
   maintainTerrain();
-
-  // Score for distance
-  if (frameCount % 12 === 0) score += 1;
+  maintainTrees();
 }
 
 // ================================================================
 // --- RENDER ---
 // ================================================================
-function pixelText(text, x, y, size, color, align) {
-  ctx.font = size + 'px monospace';
-  ctx.textAlign = align || 'left';
-  ctx.fillStyle = color || '#fff';
-  ctx.fillText(text, x, y);
-}
 
-function drawTerrain() {
-  ctx.lineWidth = 2;
+function drawBackground() {
+  // 1) Static sky — single fast blit
+  ctx.drawImage(staticBg, 0, 0);
 
-  // Draw filled snow ground
-  ctx.beginPath();
-  ctx.moveTo(segments[0].x1 - camX, H);
-  for (let i = 0; i < segments.length; i++) {
-    ctx.lineTo(segments[i].x1 - camX, segments[i].y1);
+  // 2) Far mountain silhouettes (very slow parallax)
+  const mfx = (-(camX * 0.05) % W + W) % W | 0;
+  const mfy = (H * 0.46 - camY * 0.04) | 0;
+  ctx.fillStyle = '#0c1d38';
+  for (let p = -1; p <= 1; p++) {
+    const ox = mfx + p * W;
+    ctx.beginPath();
+    ctx.moveTo(ox, H);
+    ctx.lineTo(ox,       mfy);
+    ctx.lineTo(ox + 55,  mfy - 34);
+    ctx.lineTo(ox + 120, mfy - 14);
+    ctx.lineTo(ox + 165, mfy - 52);
+    ctx.lineTo(ox + 220, mfy - 22);
+    ctx.lineTo(ox + 278, mfy - 42);
+    ctx.lineTo(ox + W,   mfy);
+    ctx.lineTo(ox + W, H);
+    ctx.closePath();
+    ctx.fill();
+    // snow caps
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.moveTo(ox+165,mfy-52); ctx.lineTo(ox+148,mfy-34); ctx.lineTo(ox+182,mfy-34); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(ox+278,mfy-42); ctx.lineTo(ox+264,mfy-27); ctx.lineTo(ox+292,mfy-27); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#0c1d38';
   }
-  const last = segments[segments.length - 1];
-  ctx.lineTo(last.x2 - camX, last.y2);
-  ctx.lineTo(last.x2 - camX, H);
-  ctx.closePath();
-  const snowGrad = ctx.createLinearGradient(0, GROUND_Y - 10, 0, H);
-  snowGrad.addColorStop(0,   '#e8f4fd');
-  snowGrad.addColorStop(0.3, '#c8dff0');
-  snowGrad.addColorStop(1,   '#8aaccc');
-  ctx.fillStyle = snowGrad;
-  ctx.fill();
 
-  // Surface line
-  ctx.beginPath();
-  for (let i = 0; i < segments.length; i++) {
-    const s = segments[i];
-    if (i === 0) ctx.moveTo(s.x1 - camX, s.y1);
-    else ctx.lineTo(s.x1 - camX, s.y1);
-    ctx.lineTo(s.x2 - camX, s.y2);
-    // Ramp highlight
-    if (s.isRamp) {
-      ctx.strokeStyle = '#aad4f5';
-      ctx.lineWidth = 3;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.strokeStyle = '#c8dff0';
-      ctx.lineWidth = 1;
-      // ramp tip marker
-      ctx.moveTo(s.x2 - camX - 4, s.y2 - 4);
-      ctx.lineTo(s.x2 - camX + 4, s.y2 - 4);
-      ctx.stroke();
-      ctx.beginPath();
-      if (i < segments.length - 1) {
-        ctx.moveTo(segments[i+1].x1 - camX, segments[i+1].y1);
-      }
-    }
+  // 3) Near mountain silhouettes
+  const mnx = (-(camX * 0.12) % W + W) % W | 0;
+  const mny = (H * 0.54 - camY * 0.06) | 0;
+  ctx.fillStyle = '#101f3c';
+  for (let p = -1; p <= 1; p++) {
+    const ox = mnx + p * W;
+    ctx.beginPath();
+    ctx.moveTo(ox, H);
+    ctx.lineTo(ox,       mny + 8);
+    ctx.lineTo(ox + 75,  mny - 24);
+    ctx.lineTo(ox + 140, mny + 2);
+    ctx.lineTo(ox + 195, mny - 32);
+    ctx.lineTo(ox + 255, mny - 8);
+    ctx.lineTo(ox + W,   mny + 8);
+    ctx.lineTo(ox + W, H);
+    ctx.closePath();
+    ctx.fill();
   }
-  ctx.strokeStyle = '#c0d8ee';
-  ctx.lineWidth = 2;
-  ctx.stroke();
 
-  // Ramp arrows
-  segments.forEach(s => {
-    if (s.isRamp) {
-      const mx = (s.x1 + s.x2) / 2 - camX;
-      const my = (s.y1 + s.y2) / 2;
-      ctx.fillStyle = 'rgba(200,169,81,0.7)';
-      ctx.font = '6px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('▲', mx, my - 4);
+  // 4) Parallax pine trees (midground)
+  PINES.forEach(pine => {
+    const pf = PINE_PX[pine.layer];
+    const sx = ((pine.rx - camX * pf) % PINE_WRAP + PINE_WRAP) % PINE_WRAP - 120 | 0;
+    // Vertical: base sits at a fixed screen fraction, slight camY influence
+    const sy = (H * 0.60 - camY * pf * 0.12 + pine.layer * 7) | 0;
+    const h  = pine.h;
+    ctx.fillStyle = PINE_COL[pine.layer];
+    ctx.fillRect(sx - 1, sy, 2, 5); // trunk
+    const tiers = pine.tall ? 3 : 2;
+    for (let t = 0; t < tiers; t++) {
+      const tw = Math.max(2, (h * 0.54 * (tiers - t) / tiers) | 0);
+      const ty = (sy - h * t / tiers) | 0;
+      const th = (h / tiers + 2) | 0;
+      ctx.beginPath();
+      ctx.moveTo(sx, ty);
+      ctx.lineTo(sx - tw, ty + th);
+      ctx.lineTo(sx + tw, ty + th);
+      ctx.closePath();
+      ctx.fill();
     }
   });
 }
 
+function drawTerrain() {
+  // Snow fill
+  ctx.beginPath();
+  const f = segments[0];
+  ctx.moveTo((f.x1 - camX) | 0, H + 10);
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i];
+    ctx.lineTo((s.x1 - camX) | 0, (s.y1 - camY) | 0);
+  }
+  const l = segments[segments.length - 1];
+  ctx.lineTo((l.x2 - camX) | 0, (l.y2 - camY) | 0);
+  ctx.lineTo((l.x2 - camX) | 0, H + 10);
+  ctx.closePath();
+  ctx.fillStyle = '#d8eaf6';
+  ctx.fill();
+
+  // Surface line + ramp markers
+  ctx.lineWidth = 2;
+  for (let i = 0; i < segments.length; i++) {
+    const s  = segments[i];
+    const x1 = (s.x1 - camX) | 0, y1 = (s.y1 - camY) | 0;
+    const x2 = (s.x2 - camX) | 0, y2 = (s.y2 - camY) | 0;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.strokeStyle = s.isRamp ? '#9fc8e8' : '#b4d4ec';
+    ctx.lineWidth   = s.isRamp ? 3 : 2;
+    ctx.stroke();
+    if (s.isRamp) {
+      ctx.fillStyle = '#c8a951';
+      ctx.font = '6px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('▲', (x1 + x2) / 2 | 0, ((y1 + y2) / 2 - 5) | 0);
+    }
+  }
+}
+
+function drawTrees() {
+  trees.forEach(tree => {
+    const sx = (tree.wx - camX) | 0;
+    const sy = (tree.baseY - camY) | 0;
+    if (sx < -12 || sx > W + 12) return;
+    const h = tree.height;
+    // Trunk
+    ctx.fillStyle = '#1a2c10';
+    ctx.fillRect(sx - 1, sy - h, 2, h);
+    // Tiers
+    ctx.fillStyle = '#1e4d2b';
+    const tiers = tree.tall ? 3 : 2;
+    for (let t = 0; t < tiers; t++) {
+      const tw = Math.max(2, (h * 0.52 * (tiers - t) / tiers) | 0);
+      const ty = (sy - h + h * t / tiers) | 0;
+      const th = (h / tiers + 2) | 0;
+      ctx.beginPath();
+      ctx.moveTo(sx, ty);
+      ctx.lineTo(sx - tw, ty + th);
+      ctx.lineTo(sx + tw, ty + th);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // Snow cap
+    ctx.fillStyle = 'rgba(225,242,255,0.72)';
+    const cw = Math.max(2, (h * 0.17) | 0);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - h - 2);
+    ctx.lineTo(sx - cw, sy - h + cw + 1);
+    ctx.lineTo(sx + cw, sy - h + cw + 1);
+    ctx.closePath();
+    ctx.fill();
+  });
+}
+
+function px(txt, x, y, sz, col, align) {
+  ctx.font = sz + 'px monospace';
+  ctx.textAlign = align || 'left';
+  ctx.fillStyle = col || '#fff';
+  ctx.fillText(txt, x | 0, y | 0);
+}
+
 function drawHUD() {
-  // Score
-  pixelText('SCORE', 5, 10, 6, '#aad4f5');
-  pixelText(score.toString(), 5, 19, 9, '#ffffff', 'left');
+  px('SCORE',  5, 10, 6, '#aad4f5');
+  px(score,    5, 20, 9, '#fff');
+  px('BEST: ' + bestScore, 5, 31, 6, '#c8a951');
 
-  // Best
-  pixelText('BEST: ' + bestScore, 5, 30, 6, '#c8a951');
+  if (comboCount > 1) px('COMBO x' + comboCount, W - 5, 10, 7, '#c8a951', 'right');
 
-  // Combo multiplier (top right, only when active)
-  if (comboMult > 1 || combo > 0) {
-    pixelText('x' + comboMult + ' COMBO', W - 5, 10, 7, '#c8a951', 'right');
+  // Air-time overlay
+  if (!player.onGround && (spinScored || grabDone || methodDone || airMult > 1)) {
+    px(airMult.toFixed(1) + 'x', W - 5, 21, 7, '#ffe066', 'right');
+    let parts = [];
+    if (spinScored) parts.push(spinScored * 180 + '°');
+    if (grabDone)   parts.push('GRAB');
+    if (methodDone) parts.push('MTH');
+    if (parts.length) px(parts.join('+'), W - 5, 31, 5, 'rgba(255,255,255,0.65)', 'right');
   }
 
-  // Trick name flash
+  // Trick flash
   if (trickFlash > 0 && trickName) {
-    const alpha = Math.min(1, trickFlash / 20);
-    ctx.globalAlpha = alpha;
-    pixelText(trickName, W / 2, H / 2 - 30, 8, '#ffe066', 'center');
+    const a = Math.min(1, trickFlash / 25);
+    ctx.globalAlpha = a;
+    ctx.font = '8px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillText(trickName, W / 2 + 1, H / 2 - 27);
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText(trickName, W / 2, H / 2 - 28);
     ctx.globalAlpha = 1;
+    trickFlash--;
   }
 
-  // Sketchy landing indicator
-  if (player.landSketch > 0) {
-    pixelText('SKETCHY!', W / 2, H / 2 - 18, 7, '#ff6b6b', 'center');
-  }
-
-  // Mute icon (bottom right)
-  pixelText(muted ? '🔇' : '🔊', W - 6, H - 4, 8, '#aaa', 'right');
-  ctx.font = '6px monospace';
-  ctx.textAlign = 'right';
-  ctx.fillStyle = 'rgba(255,255,255,0.3)';
-  ctx.fillText('[M]', W - 6, H - 4);
+  // Mute hint
+  ctx.font = '5px monospace'; ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.fillText(muted ? '[M] muted' : '[M] sound', W - 4, H - 4);
 }
 
-function drawTitleScreen() {
-  // Background
-  drawBackground();
-
-  // Ground
-  ctx.fillStyle = '#c8dff0';
-  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
-
-  // Idle rider bounce
-  const bounce = Math.sin(frameCount * 0.08) * 2;
-  drawRider(W / 2, GROUND_Y - 10 + bounce, 0, false, false, false, false);
-
-  // Title panel
-  ctx.fillStyle = 'rgba(10,14,39,0.78)';
-  ctx.fillRect(W/2 - 80, 28, 160, 80);
-  ctx.strokeStyle = '#c8a951';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(W/2 - 80, 28, 160, 80);
-
-  pixelText('POWDER RUN', W/2, 46, 11, '#c8a951', 'center');
-  pixelText('SNOWBOARDING', W/2, 57, 7, 'rgba(255,255,255,0.6)', 'center');
-
-  // Blinking prompt
-  if (Math.floor(frameCount / 20) % 2 === 0) {
-    pixelText('PRESS SPACE TO DROP IN', W/2, 80, 6, '#fff', 'center');
-  }
-
-  pixelText('← → SPIN  ↑ GRAB  ↓ METHOD', W/2, 92, 5, 'rgba(255,255,255,0.5)', 'center');
-  pixelText('BEST: ' + bestScore, W/2, 103, 6, '#c8a951', 'center');
-
-  frameCount++;
-}
-
-function drawGameOverScreen() {
-  // Darken
-  ctx.fillStyle = 'rgba(10,14,39,0.6)';
-  ctx.fillRect(0, 0, W, H);
-
-  // Panel
-  ctx.fillStyle = 'rgba(10,14,39,0.92)';
-  ctx.fillRect(W/2 - 80, H/2 - 50, 160, 90);
-  ctx.strokeStyle = '#e74c3c';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(W/2 - 80, H/2 - 50, 160, 90);
-
-  pixelText('WIPED OUT', W/2, H/2 - 34, 11, '#e74c3c', 'center');
-  pixelText('SCORE: ' + score, W/2, H/2 - 16, 8, '#fff', 'center');
-  pixelText('BEST:  ' + bestScore, W/2, H/2 - 4, 7, '#c8a951', 'center');
-
-  if (score >= bestScore && score > 0) {
-    pixelText('★ NEW BEST! ★', W/2, H/2 + 8, 7, '#ffe066', 'center');
-  }
-
-  if (Math.floor(frameCount / 20) % 2 === 0) {
-    pixelText('PRESS R OR SPACE', W/2, H/2 + 22, 6, '#fff', 'center');
-    pixelText('TO RETRY', W/2, H/2 + 31, 6, '#fff', 'center');
-  }
-
-  frameCount++;
-}
-
-function drawPlayingFrame() {
+function drawPlaying() {
   drawBackground();
   drawTerrain();
+  drawTrees();
 
-  // Rider screen position
-  const sx = player.wx - camX;
-  const sy = player.wy;
+  const sx  = (player.wx - camX) | 0;
+  const sy  = (player.wy - camY) | 0;
+  const ang = player.onGround
+    ? player.angle
+    : (player.spinAngle * Math.PI / 180);
 
-  // Board angle = slope angle when grounded, spin when in air
-  let drawAngle = player.angle;
-  if (!player.onGround) {
-    drawAngle = (player.spinAngle * Math.PI / 180);
-  }
-
-  drawRider(sx, sy, drawAngle, player.spinAngle !== 0 && !player.onGround,
-            player.grabbing, player.method, player.crashed);
-
+  drawRider(sx, sy, ang, player.grabbing, player.method, player.crashed);
   drawHUD();
+}
+
+function drawTitle() {
+  drawBackground();
+  // Ground strip
+  ctx.fillStyle = '#c8dff0';
+  ctx.fillRect(0, H * 0.72 | 0, W, H);
+  // Idle bounce
+  const bounce = Math.sin(frameCount * 0.07) * 2 | 0;
+  drawRider(W / 2 | 0, (H * 0.72 - 10 + bounce) | 0, 0, false, false, false);
+
+  ctx.fillStyle = 'rgba(6,9,20,0.84)';
+  ctx.fillRect(W / 2 - 88, 20, 176, 96);
+  ctx.strokeStyle = '#c8a951'; ctx.lineWidth = 1;
+  ctx.strokeRect(W / 2 - 88, 20, 176, 96);
+
+  px('POWDER RUN',          W/2, 38,  11, '#c8a951', 'center');
+  px('DOWNHILL SNOWBOARDING', W/2, 50, 6,  'rgba(255,255,255,0.5)', 'center');
+
+  if (Math.floor(frameCount / 22) % 2 === 0)
+    px('PRESS SPACE TO DROP IN', W/2, 70, 6, '#fff', 'center');
+
+  px('SPACE=Jump  ← →=Spin  ↑=Grab  ↓=Method', W/2, 83, 5, 'rgba(255,255,255,0.42)', 'center');
+  px('Release tricks BEFORE landing!',           W/2, 93, 5, '#ff8888', 'center');
+  px('TREES = INSTANT WIPEOUT',                  W/2,103, 5, '#ffaa44', 'center');
+  px('BEST: ' + bestScore,                       W/2,113, 6, '#c8a951', 'center');
+
+  frameCount++;
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(6,9,20,0.62)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(6,9,20,0.94)';
+  ctx.fillRect(W/2 - 82, H/2 - 54, 164, 100);
+  ctx.strokeStyle = '#e74c3c'; ctx.lineWidth = 1;
+  ctx.strokeRect(W/2 - 82, H/2 - 54, 164, 100);
+
+  px('WIPED OUT',   W/2, H/2 - 38, 11, '#e74c3c', 'center');
+  px('SCORE: ' + score,     W/2, H/2 - 19, 8, '#fff',    'center');
+  px('BEST:  ' + bestScore, W/2, H/2 -  7, 7, '#c8a951', 'center');
+  if (score >= bestScore && score > 0)
+    px('★ NEW BEST ★', W/2, H/2 + 7, 7, '#ffe066', 'center');
+  if (Math.floor(frameCount / 22) % 2 === 0)
+    px('SPACE / R  TO RETRY', W/2, H/2 + 24, 6, '#fff', 'center');
+
+  frameCount++;
 }
 
 // ================================================================
@@ -945,24 +859,20 @@ function drawPlayingFrame() {
 // ================================================================
 function loop(ts) {
   requestAnimationFrame(loop);
-
   if (lastTime === null) lastTime = ts;
   const dt = Math.min((ts - lastTime) / 1000, 0.05);
   lastTime = ts;
 
   if (gameState === 'playing') {
     accumulator += dt;
-    while (accumulator >= FIXED_DT) {
-      update();
-      accumulator -= FIXED_DT;
-    }
-    drawPlayingFrame();
+    while (accumulator >= FIXED_DT) { update(); accumulator -= FIXED_DT; }
+    drawPlaying();
   } else if (gameState === 'title') {
-    drawTitleScreen();
-  } else if (gameState === 'gameover') {
-    drawPlayingFrame();
-    drawGameOverScreen();
-    if (keys['KeyR'] || keys['Space']) { startGame(); }
+    drawTitle();
+  } else {
+    drawPlaying();
+    drawGameOver();
+    if (keys['KeyR'] || keys['Space']) startGame();
   }
 }
 
@@ -970,6 +880,7 @@ function loop(ts) {
 // --- INIT ---
 // ================================================================
 initTerrain();
+initTrees();
 requestAnimationFrame(loop);
 </script>
 
